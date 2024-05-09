@@ -2,84 +2,80 @@ package coolq
 
 import (
 	"strconv"
+	"strings"
 
 	"github.com/Mrs4s/MiraiGo/client"
 	"github.com/Mrs4s/MiraiGo/message"
+	"github.com/Mrs4s/MiraiGo/topic"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/Mrs4s/go-cqhttp/global"
 )
 
 func convertGroupMemberInfo(groupID int64, m *client.GroupMemberInfo) global.MSG {
+	sex := "unknown"
+	if m.Gender == 1 { // unknown = 0xff
+		sex = "female"
+	} else if m.Gender == 0 {
+		sex = "male"
+	}
+	role := "member"
+	switch m.Permission { // nolint:exhaustive
+	case client.Owner:
+		role = "owner"
+	case client.Administrator:
+		role = "admin"
+	}
 	return global.MSG{
-		"group_id": groupID,
-		"user_id":  m.Uin,
-		"nickname": m.Nickname,
-		"card":     m.CardName,
-		"sex": func() string {
-			if m.Gender == 1 {
-				return "female"
-			} else if m.Gender == 0 {
-				return "male"
-			}
-			// unknown = 0xff
-			return "unknown"
-		}(),
+		"group_id":          groupID,
+		"user_id":           m.Uin,
+		"nickname":          m.Nickname,
+		"card":              m.CardName,
+		"sex":               sex,
 		"age":               0,
 		"area":              "",
 		"join_time":         m.JoinTime,
 		"last_sent_time":    m.LastSpeakTime,
 		"shut_up_timestamp": m.ShutUpTimestamp,
 		"level":             strconv.FormatInt(int64(m.Level), 10),
-		"role": func() string {
-			switch m.Permission {
-			case client.Owner:
-				return "owner"
-			case client.Administrator:
-				return "admin"
-			case client.Member:
-				return "member"
-			default:
-				return "member"
-			}
-		}(),
+		"role":              role,
 		"unfriendly":        false,
 		"title":             m.SpecialTitle,
-		"title_expire_time": m.SpecialTitleExpireTime,
+		"title_expire_time": 0,
 		"card_changeable":   false,
 	}
 }
 
-func convertGuildMemberInfo(m *client.GuildMemberInfo) global.MSG {
-	return global.MSG{
-		"tiny_id":  m.TinyId,
-		"title":    m.Title,
-		"nickname": m.Nickname,
-		"role":     m.Role,
+func convertGuildMemberInfo(m []*client.GuildMemberInfo) (r []global.MSG) {
+	for _, mem := range m {
+		r = append(r, global.MSG{
+			"tiny_id":   fU64(mem.TinyId),
+			"title":     mem.Title,
+			"nickname":  mem.Nickname,
+			"role_id":   fU64(mem.Role),
+			"role_name": mem.RoleName,
+		})
 	}
+	return
 }
 
-func (bot *CQBot) formatGroupMessage(m *message.GroupMessage) global.MSG {
-	source := MessageSource{
-		SourceType: MessageSourceGroup,
-		PrimaryID:  uint64(m.GroupCode),
+func (bot *CQBot) formatGroupMessage(m *message.GroupMessage) *event {
+	source := message.Source{
+		SourceType: message.SourceGroup,
+		PrimaryID:  m.GroupCode,
 	}
-	cqm := ToStringMessage(m.Elements, source, true)
+	cqm := toStringMessage(m.Elements, source)
+	typ := "message/group/normal"
+	if m.Sender.Uin == bot.Client.Uin {
+		typ = "message_sent/group/normal"
+	}
 	gm := global.MSG{
-		"anonymous":    nil,
-		"font":         0,
-		"group_id":     m.GroupCode,
-		"message":      ToFormattedMessage(m.Elements, source, false),
-		"message_type": "group",
-		"message_seq":  m.Id,
-		"post_type": func() string {
-			if m.Sender.Uin == bot.Client.Uin {
-				return "message_sent"
-			}
-			return "message"
-		}(),
+		"anonymous":   nil,
+		"font":        0,
+		"group_id":    m.GroupCode,
+		"message":     ToFormattedMessage(m.Elements, source),
+		"message_seq": m.Id,
 		"raw_message": cqm,
-		"self_id":     bot.Client.Uin,
 		"sender": global.MSG{
 			"age":     0,
 			"area":    "",
@@ -87,9 +83,7 @@ func (bot *CQBot) formatGroupMessage(m *message.GroupMessage) global.MSG {
 			"sex":     "unknown",
 			"user_id": m.Sender.Uin,
 		},
-		"sub_type": "normal",
-		"time":     m.Time,
-		"user_id":  m.Sender.Uin,
+		"user_id": m.Sender.Uin,
 	}
 	if m.Sender.IsAnonymous() {
 		gm["anonymous"] = global.MSG{
@@ -98,7 +92,7 @@ func (bot *CQBot) formatGroupMessage(m *message.GroupMessage) global.MSG {
 			"name": m.Sender.AnonymousInfo.AnonymousNick,
 		}
 		gm["sender"].(global.MSG)["nickname"] = "匿名消息"
-		gm["sub_type"] = "anonymous"
+		typ = "message/group/anonymous"
 	} else {
 		group := bot.Client.FindGroup(m.GroupCode)
 		mem := group.FindMember(m.Sender.Uin)
@@ -116,21 +110,21 @@ func (bot *CQBot) formatGroupMessage(m *message.GroupMessage) global.MSG {
 			}
 		}
 		ms := gm["sender"].(global.MSG)
-		switch mem.Permission {
+		role := "member"
+		switch mem.Permission { // nolint:exhaustive
 		case client.Owner:
-			ms["role"] = "owner"
+			role = "owner"
 		case client.Administrator:
-			ms["role"] = "admin"
-		case client.Member:
-			ms["role"] = "member"
-		default:
-			ms["role"] = "member"
+			role = "admin"
 		}
+		ms["role"] = role
 		ms["nickname"] = mem.Nickname
 		ms["card"] = mem.CardName
 		ms["title"] = mem.SpecialTitle
 	}
-	return gm
+	ev := bot.event(typ, gm)
+	ev.Time = int64(m.Time)
+	return ev
 }
 
 func convertChannelInfo(c *client.ChannelInfo) global.MSG {
@@ -144,16 +138,85 @@ func convertChannelInfo(c *client.ChannelInfo) global.MSG {
 		})
 	}
 	return global.MSG{
-		"channel_id":        c.ChannelId,
+		"channel_id":        fU64(c.ChannelId),
 		"channel_type":      c.ChannelType,
 		"channel_name":      c.ChannelName,
-		"owner_guild_id":    c.Meta.GuildId,
-		"creator_id":        c.Meta.CreatorUin,
-		"creator_tiny_id":   c.Meta.CreatorTinyId,
+		"owner_guild_id":    fU64(c.Meta.GuildId),
+		"creator_tiny_id":   fU64(c.Meta.CreatorTinyId),
 		"create_time":       c.Meta.CreateTime,
 		"current_slow_mode": c.Meta.CurrentSlowMode,
 		"talk_permission":   c.Meta.TalkPermission,
 		"visible_type":      c.Meta.VisibleType,
 		"slow_modes":        slowModes,
 	}
+}
+
+func convertChannelFeedInfo(f *topic.Feed) global.MSG {
+	m := global.MSG{
+		"id":          f.Id,
+		"title":       f.Title,
+		"sub_title":   f.SubTitle,
+		"create_time": f.CreateTime,
+		"guild_id":    fU64(f.GuildId),
+		"channel_id":  fU64(f.ChannelId),
+		"poster_info": global.MSG{
+			"tiny_id":  f.Poster.TinyIdStr,
+			"nickname": f.Poster.Nickname,
+			"icon_url": f.Poster.IconUrl,
+		},
+		"contents": FeedContentsToArrayMessage(f.Contents),
+	}
+	images := make([]global.MSG, 0, len(f.Images))
+	videos := make([]global.MSG, 0, len(f.Videos))
+	for _, image := range f.Images {
+		images = append(images, global.MSG{
+			"file_id":    image.FileId,
+			"pattern_id": image.PatternId,
+			"url":        image.Url,
+			"width":      image.Width,
+			"height":     image.Height,
+		})
+	}
+	for _, video := range f.Videos {
+		videos = append(videos, global.MSG{
+			"file_id":    video.FileId,
+			"pattern_id": video.PatternId,
+			"url":        video.Url,
+			"width":      video.Width,
+			"height":     video.Height,
+		})
+	}
+	m["resource"] = global.MSG{
+		"images": images,
+		"videos": videos,
+	}
+	return m
+}
+
+func convertReactions(reactions []*message.GuildMessageEmojiReaction) (r []global.MSG) {
+	r = make([]global.MSG, len(reactions))
+	for i, re := range reactions {
+		r[i] = global.MSG{
+			"emoji_id":    re.EmojiId,
+			"emoji_index": re.Face.Index,
+			"emoji_type":  re.EmojiType,
+			"emoji_name":  re.Face.Name,
+			"count":       re.Count,
+			"clicked":     re.Clicked,
+		}
+	}
+	return
+}
+
+func toStringMessage(m []message.IMessageElement, source message.Source) string {
+	elems := toElements(m, source)
+	var sb strings.Builder
+	for _, elem := range elems {
+		elem.WriteCQCodeTo(&sb)
+	}
+	return sb.String()
+}
+
+func fU64(v uint64) string {
+	return strconv.FormatUint(v, 10)
 }
